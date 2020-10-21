@@ -2,13 +2,16 @@
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.S3.Transfer;
+using awss3webapi.Models;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading.Tasks;
 using System.Web;
 using System.Web.Http;
@@ -51,6 +54,8 @@ namespace awss3webapi.Controllers
         [Route("api/S3PreSigned/GeneratePreSignedURL")]
         public async Task<IHttpActionResult> GeneratePreSignedURL()
         {
+            string customer = HttpContext.Current.Request.Form["customer"].ToString();
+
             if (!Request.Content.IsMimeMultipartContent())
             {
                 return StatusCode(HttpStatusCode.UnsupportedMediaType);
@@ -63,19 +68,22 @@ namespace awss3webapi.Controllers
 
             foreach (var stream in filesReadToProvider.Contents)
             {
-                var filestream = await stream.ReadAsStreamAsync();
-
-                var request = new GetPreSignedUrlRequest
+                if (stream.Headers.ContentType != null)
                 {
-                    BucketName = bucketName,
-                    Key = stream.Headers.ContentDisposition.FileName.Trim('\"'),
-                    Verb = HttpVerb.PUT,
-                    Expires = DateTime.UtcNow.AddMinutes(10)
-                };
+                    var filestream = await stream.ReadAsStreamAsync();
 
-                var url = s3Client.GetPreSignedURL(request);
+                    var request = new GetPreSignedUrlRequest
+                    {
+                        BucketName = bucketName,
+                        Key = customer + "/" + stream.Headers.ContentDisposition.FileName.Trim('\"'),
+                        Verb = HttpVerb.PUT,
+                        Expires = DateTime.UtcNow.AddMinutes(10)
+                    };
 
-                response.Add(url);
+                    var url = s3Client.GetPreSignedURL(request);
+
+                    response.Add(url);
+                }
             }
 
             if (response == null)
@@ -90,47 +98,77 @@ namespace awss3webapi.Controllers
         [Route("api/S3PreSigned/UploadDocUsingPreSignedURL")]
         public async Task<IHttpActionResult> UploadDocUsingPreSignedURL()
         {
-           
-            string psurl = HttpContext.Current.Request.Form["psurl"].ToString();
 
-            if (psurl == string.Empty)
+            try
             {
-                return BadRequest("The request doesn't contain presignedurl against which to upload");
-            }
+                string psurl = HttpContext.Current.Request.Form["psurl"].ToString();
 
-            if (!Request.Content.IsMimeMultipartContent())
-            {
-                return StatusCode(HttpStatusCode.UnsupportedMediaType);
-            }
-
-            var filesReadToProvider = await Request.Content.ReadAsMultipartAsync();
-            s3Client = new AmazonS3Client(RegionEndpoint.USWest2);
-            var filestream1 = await filesReadToProvider.Contents[0].ReadAsStreamAsync();
-
-
-            HttpWebRequest httpRequest = WebRequest.Create(psurl) as HttpWebRequest;
-            httpRequest.Method = "PUT";
-            using (Stream dataStream = httpRequest.GetRequestStream())
-            {
-                var buffer = new byte[8000];
-                using (Stream fileStream = filestream1)
+                if (psurl == string.Empty)
                 {
-                    int bytesRead = 0;
-                    while ((bytesRead = fileStream.Read(buffer, 0, buffer.Length)) > 0)
+                    return BadRequest("The request doesn't contain presignedurl against which to upload");
+                }
+
+                if (!Request.Content.IsMimeMultipartContent())
+                {
+                    return StatusCode(HttpStatusCode.UnsupportedMediaType);
+                }
+
+                var filesReadToProvider = await Request.Content.ReadAsMultipartAsync();
+                var filestream1 = await filesReadToProvider.Contents[0].ReadAsStreamAsync();
+
+                string strUploadedFileName = string.Empty;
+                string psurlFileName = string.Empty;
+
+
+                s3Client = new AmazonS3Client(RegionEndpoint.USWest2);
+
+                HttpWebRequest httpRequest = WebRequest.Create(psurl) as HttpWebRequest;
+
+                foreach (var stream in filesReadToProvider.Contents)
+                {
+                    if (stream.Headers.ContentType == null)
                     {
-                        dataStream.Write(buffer, 0, bytesRead);
+                        psurlFileName = httpRequest.Address.Segments[2];
+                    }
+                    if (stream.Headers.ContentType != null)
+                    {
+                        strUploadedFileName = stream.Headers.ContentDisposition.FileName.Trim('\"');
+
                     }
                 }
+
+                if (strUploadedFileName.ToUpper() != psurlFileName.ToUpper())
+                {
+                    return BadRequest("It seemed uploaded file is not same against which presigned url is provided");
+                }
+
+
+                httpRequest.Method = "PUT";
+                using (Stream dataStream = httpRequest.GetRequestStream())
+                {
+                    var buffer = new byte[8000];
+                    using (Stream fileStream = filestream1)
+                    {
+                        int bytesRead = 0;
+                        while ((bytesRead = fileStream.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            dataStream.Write(buffer, 0, bytesRead);
+                        }
+                    }
+                }
+                HttpWebResponse response = httpRequest.GetResponse() as HttpWebResponse;
+
+                if(response.StatusCode == HttpStatusCode.OK)
+                {
+                    await NotifyFileUpload();
+                }                
             }
-            HttpWebResponse response = httpRequest.GetResponse() as HttpWebResponse;
+            catch(Exception ex)
+            {
+                return Content(HttpStatusCode.InternalServerError, "There is some error, while uploading document " + ex.Message);
+            }     
 
             return Content(HttpStatusCode.OK, "Documents uploaded successfully");
-
-
-
-
-
-
 
 
             ////////var response = new List<string>();
@@ -327,5 +365,71 @@ namespace awss3webapi.Controllers
 
         //    return Ok(response);
         //}
-    }
+
+
+       
+        public async Task<Boolean> NotifyFileUpload()
+        {
+            using (var client = new HttpClient())
+            {                
+                client.BaseAddress = new Uri(ConfigurationManager.AppSettings["NotificationURL"]);
+                client.DefaultRequestHeaders.Accept.Clear();
+                client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                
+                var objEmail = new EmailModel()
+                {
+                    toname = ConfigurationManager.AppSettings["toname"],
+                    toemail = ConfigurationManager.AppSettings["toemail"],
+                    subject = ConfigurationManager.AppSettings["subject"],
+                    message = ConfigurationManager.AppSettings["message"]                  
+                };
+
+                HttpResponseMessage response = await client.PostAsJsonAsync<EmailModel>("api/Email/SendEmail", objEmail);
+                if (response.IsSuccessStatusCode)
+                {
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+        }
+
+
+
+        //////////[HttpPost]
+        //////////[Route("api/S3PreSigned/NotifyFileUpload")]
+        //////////public async Task<IHttpActionResult> NotifyFileUpload()
+        //////////{
+        //////////    using (var client = new HttpClient())
+        //////////    {
+        //////////        client.BaseAddress = new Uri("http://localhost:58288/");
+        //////////        client.DefaultRequestHeaders.Accept.Clear();
+        //////////        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        //////////        //GET Method  
+        //////////        var objEmail = new EmailModel()
+        //////////        {   
+        //////////            toname = "lalit",
+        //////////            toemail = "lalit.nailwal@ebix.com",
+        //////////            subject = "test",
+        //////////            message = "A file has been uploaded to your s3 bucket"
+        //////////        };
+
+        //////////    HttpResponseMessage response = await client.PostAsJsonAsync<EmailModel>("api/Email/SendEmail", objEmail);
+        //////////        if (response.IsSuccessStatusCode)
+        //////////        {
+        //////////            Console.WriteLine("success");
+        //////////        }
+        //////////        else
+        //////////        {
+        //////////            Console.WriteLine("Internal server Error");
+        //////////        }
+        //////////    }
+
+        //////////    return Ok();
+        //////////}
+
+
+    }    
 }

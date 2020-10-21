@@ -37,8 +37,7 @@ namespace awss3webapi.Controllers
             //config.CommunicationProtocol = Protocol.HTTP;
             config.RegionEndpoint = Amazon.RegionEndpoint.USWest2;
 
-            //var accessKey = "AKIA4ILTP6SRBBKLZM7X";
-            //var secretAccesskey = "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";
+            
             s3Client = new AmazonS3Client(RegionEndpoint.USWest2);
 
             if (!(s3Client.DoesS3BucketExist(bucketName)))
