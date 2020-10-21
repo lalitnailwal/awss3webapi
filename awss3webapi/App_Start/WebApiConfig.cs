@@ -19,10 +19,6 @@ namespace awss3webapi
                 routeTemplate: "api/{controller}/{id}",
                 defaults: new { id = RouteParameter.Optional }
             );
-
-            //config.Formatters.XmlFormatter.SupportedMediaTypes.Add(new System.Net.Http.Headers.MediaTypeHeaderValue("multipart/form-data"));
-
-             //config.Formatters.Add(new MultipartFormDataFormatter());
         }
     }
 }
